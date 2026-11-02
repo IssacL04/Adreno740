@@ -8,6 +8,7 @@ struct NativeAdrenoCpInitConfig {
     /* Nonzero when the caller already wrote CP_SQE_INSTR_BASE before CP_SQE_CNTL, as a6xx hw_init does: the base is
      * then read back and compared instead of rewritten after the SQE started. */
     uint32_t sqe_base_programmed;
+    uint64_t aqe_iova=0;           /* A830 AQE instruction buffer; same readback policy as SQE. */
 };
 /* One-shot A7XX command-processor start sequence, not a GPU power or reset
  * driver. The caller must have completed GMU boot, powered GX/core clocks,

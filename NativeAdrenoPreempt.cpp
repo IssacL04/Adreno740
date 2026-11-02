@@ -111,7 +111,11 @@ IOReturn NativeAdrenoPreempt::detach()
 /* Both rings' records as the CPU sees them: read pointer, write pointer, errno, info. */
 void NativeAdrenoPreempt::snapshot(volatile uint32_t *row,unsigned first) const
 {
+#if defined(__aarch64__)
     __asm__ volatile("dsb sy":::"memory");
+#else
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
     for(unsigned r=0;r<NativeAdrenoPreemptRingCount;++r) {
         const uint8_t *rec=rings_.record_cpu[r];
         row[first+r*4+0]=recordWord(rec,20);row[first+r*4+1]=recordWord(rec,24);
@@ -169,7 +173,7 @@ bool NativeAdrenoPreempt::trigger(uint32_t ring,bool uses_gmem)
     /* Keep the GPU on until the switch is done, as a6xx_preempt_keepalive_vote does. */
     if(io_.gmu_write32 && io_.gmu_write32(io_.gmu_cookie,GmuPreemptKeepalive,1)) {closeEvent(3);return false;}
     if(io_.barrier(io_.cookie)) {closeEvent(3);return false;}
-    const uint32_t cntl=CntlStop|CntlLevel1|CntlSkipSaveRestore|(uses_gmem?CntlUsesGmem:0);
+    const uint32_t cntl=CntlStop|CntlLevel1|CntlSkipSaveRestore|(uses_gmem?uint32_t(CntlUsesGmem):0);
     if(io_.write32(io_.cookie,PreemptCntl,cntl)) {closeEvent(3);return false;}
     event_[6]=readCntl();
     next_=ring;armed_=true;

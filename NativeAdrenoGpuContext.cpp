@@ -11,13 +11,16 @@ static const uint64_t kIovas[GpuBufferCount]={GpuSqeIova,GpuRingIova,GpuMemptrsI
 static const size_t kBytes[GpuBufferCount]={GpuSqeBytes,GpuRingBytes,GpuPageBytes,GpuPageBytes,GpuPageBytes,
     GpuPreemptRecordBytes,GpuPreemptRecordBytes,GpuPageBytes,GpuPageBytes,GpuRingBytes,GpuPageBytes};
 IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
-    const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
+    const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report,uint32_t chip_id)
 {
     if(!report)return kIOReturnBadArgument;
     *report={};
     if(used_)return kIOReturnBusy;
     if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 || slots[1]>127 ||
         slots[0]==slots[1])return kIOReturnBadArgument;
+    if(chip_id!=0x43050a01 && chip_id!=0x44050001)return kIOReturnUnsupported;
+    a830_=chip_id==0x44050001;
+    buffer_count_=a830_?GpuA830BufferCount:GpuBufferCount;
     used_=true;kernel_asid_=asid;
     IOReturn status=kIOReturnSuccess;
     auto step=[&](Step s) {report->step=s;if(progress)progress(s);};
@@ -32,8 +35,10 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         /* Stage-1 input size: smmu->va_size from ID2.UBS (arm_smmu_init_domain_context: ias = smmu->va_size for AArch64 stage 1). */
         input_bits_=NativeAdrenoSmmuInputBits(report->id2);
     }
-    for(unsigned i=0;!status && i<GpuBufferCount;++i)
-        status=buffers_[i].allocate(kBytes[i],report->output_bits,true,kBytes[i]);
+    for(unsigned i=0;!status && i<buffer_count_;++i) {
+        const size_t bytes=a830_ && i==0?GpuA830SqeBytes:a830_ && i==5?GpuAqeBytes:kBytes[i];
+        status=buffers_[i].allocate(bytes,report->output_bits,true,bytes);
+    }
     if(!status) {
         step(Prepare);
         const uint64_t aperture=UINT64_C(1)<<input_bits_;
@@ -47,6 +52,16 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         report->program_readback_valid=p->readback_valid;report->program_enabled=p->enabled;
         report->id1=p->id1;report->program_status=smmu_.programStatus();
         report->image=p->readback;
+        ArmSmmu4KContextConfig actual=*smmu_.configHandle();
+        actual.id0=p->id0;actual.id2=p->id2;
+        ArmSmmu4KContextImage want;
+        if(p->phase>=3 && ArmSmmu4KEncodeContext(&actual,&want)==ArmSmmu4KSuccess) {
+            const ArmSmmu4KContextImage &got=p->readback;
+            const uint32_t sctlr_want=p->enabled?want.sctlr:0;
+            report->mismatch=(got.cbar!=want.cbar)|(got.cba2r!=want.cba2r)<<1|(got.tcr!=want.tcr)<<2|
+                (got.tcr2!=want.tcr2)<<3|(got.mair0!=want.mair0)<<4|(got.mair1!=want.mair1)<<5|
+                (got.ttbr0!=want.ttbr0)<<6|(got.ttbr1!=want.ttbr1)<<7|(got.sctlr!=sctlr_want)<<8;
+        }
     }
     if(!status) {
         step(Attach);
@@ -65,9 +80,9 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     }
     if(!status) {
         step(Map);
-        /* adreno_fw_create_bo maps the SQE MSM_BO_GPU_READONLY without NOEXEC; every other kernel BO read/write. */
-        for(unsigned i=0;!status && i<GpuBufferCount;++i)
-            status=vm_.map(&buffers_[i],0,kIovas[i],i?3u:5u,0,2,&handles_[i]);
+        /* Both microcodes are read/execute; command buffers are read/write and non-executable. */
+        for(unsigned i=0;!status && i<buffer_count_;++i)
+            status=vm_.map(&buffers_[i],0,a830_ && i==5?GpuAqeIova:kIovas[i],(i==0 || (a830_ && i==5))?5u:3u,0,2,&handles_[i]);
         report->spans=uint32_t(vm_.spanCount());
     }
     if(!status) {
@@ -118,9 +133,9 @@ IOReturn NativeAdrenoGpuContext::createVm(NativeAdrenoProcessVm **out)
         if(status)native_adreno_table_switches[7]=0x30|uint32_t(p->vm_.lastResult().operation)<<8;
         if(!status)p->attached_=true;
     }
-    for(unsigned i=0;!status && i<GpuBufferCount;++i) {
+    for(unsigned i=0;!status && i<buffer_count_;++i) {
         native_adreno_table_switches[7]=4+i;
-        status=p->vm_.map(&buffers_[i],0,kIovas[i],i?3u:5u,0,2,&p->handles_[i]);
+        status=p->vm_.map(&buffers_[i],0,a830_ && i==5?GpuAqeIova:kIovas[i],(i==0 || (a830_ && i==5))?5u:3u,0,2,&p->handles_[i]);
     }
     if(status) {
         native_adreno_table_switches[6]=uint32_t(status);

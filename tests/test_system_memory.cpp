@@ -6,6 +6,7 @@
 #include <cstdio>
 #define CHECK(x) do {if(!(x)){std::fprintf(stderr,"line %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 extern "C" volatile uint32_t native_adreno_bo_memory[8];
+extern "C" int PE_parse_boot_argn(const char *,void *,int) {return 0;}
 static unsigned attribute_calls,physical_calls;
 IOReturn NativeAdrenoQueryCpu4K(NativeAdrenoCpuState *out) {CHECK(out);*out={};return kIOReturnSuccess;}
 IOReturn NativeAdrenoMaintainOwnedPages(void *mapping,size_t bytes,NativeAdrenoCacheOperation)

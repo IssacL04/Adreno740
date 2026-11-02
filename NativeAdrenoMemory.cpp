@@ -308,7 +308,11 @@ IOReturn NativeAdrenoMemory::makeWriteCombined()
 }
 /* Frees of an owned BO whose first pages a user task still maps: [0] count, [1] the last mapping's page number. */
 extern "C" {volatile uint32_t native_adreno_free_user_mapped[2];}
+#if defined(NATIVE_ADRENO_HOST_TEST) && !defined(__APPLE__)
+extern "C" unsigned int native_pmap_user_mappings(ppnum_t,void **,uint64_t *,char *) __attribute__((weak));
+#else
 extern "C" unsigned int native_pmap_user_mappings(ppnum_t,void **,uint64_t *,char *) __attribute__((weak_import));
+#endif
 IOReturn NativeAdrenoMemory::release()
 {
     native_adreno_trace_stage=30;

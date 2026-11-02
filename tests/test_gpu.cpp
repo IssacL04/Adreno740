@@ -58,7 +58,7 @@ static int idle(void *c)
 static NativeAdrenoGpuConfig config()
 {
     NativeAdrenoGpuConfig c{};
-    c.mmio={&regs,write32,read32,barrier};
+    c.mmio={&regs,write32,read32,barrier,nullptr,nullptr};
     c.cache={&regs,publish,acquire};
     c.time={&regs,timeRead};
     c.clock={&board,now,idle};
@@ -76,6 +76,18 @@ static void reset(void)
 }
 int main()
 {
+    {
+        reset();NativeAdrenoGpu gpu;NativeAdrenoGpuConfig c=config();
+        c.chip_id=NativeAdrenoChipA830;
+        CHECK(gpu.start(&ops,&c)==kIOReturnBadArgument && !board.calls);
+        c.aqe_iova=0x500000;
+        CHECK(gpu.start(&ops,&c)==kIOReturnSuccess && gpu.ready());
+        CHECK(gpu.ring()->chipId()==NativeAdrenoChipA830);
+        CHECK(regs.values[0x816]==0x300000 && regs.values[0x818]==0x500000);
+        CHECK(regs.values[0x62]==NativeAdrenoIrq::mask());
+        CHECK(!regs.values[0x830] && !regs.values[0x38]);
+        CHECK(gpu.stop()==kIOReturnSuccess && board.quiesce_calls==1);
+    }
     /* Happy path: fixed order, real ring/CP/IRQ programming, ready. */
     {
         reset();NativeAdrenoGpu gpu;const NativeAdrenoGpuConfig c=config();

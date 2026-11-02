@@ -36,6 +36,8 @@ struct NativeAdrenoGpuConfig {
     uint64_t fence_iova;
     uint64_t sqe_iova;                 /* verified SQE microcode IOVA */
     uint64_t pwrup_reglist_iova;
+    uint32_t chip_id=NativeAdrenoChipA740;
+    uint64_t aqe_iova=0;
 };
 enum { NativeAdrenoGpuSteps = 6 };
 class NativeAdrenoGpu final {

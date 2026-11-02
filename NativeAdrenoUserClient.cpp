@@ -2,6 +2,15 @@
 #include "NativeAdrenoUserClient.h"
 #include <kern/task.h>
 #include <sys/resource_private.h>   /* PRIO_DARWIN_GPU_*: the process's GPU role, set by the system */
+static int32_t currentGpuRole()
+{
+#if defined(PRIO_DARWIN_GPU_BACKGROUND) && defined(PRIO_DARWIN_GPU_UTILITY)
+    return task_get_gpu_role(current_task());
+#else
+    // shortcut: XNU 10063 has no GPU role API; keep queue priority until the OS exposes roles.
+    return -1;
+#endif
+}
 extern "C" volatile uint32_t native_adreno_trace_stage;
 /* 0 keeps user BOs cacheable and maintained before every submission (int-070..097); the board sets it from the sheng-gpu-wc boot argument. */
 /* sheng-gpu-owned-coherent=1: the GPU's own BOs use the IO-coherent path (CPU write-back view, GPU write-back inner-shareable mapping) instead of
@@ -203,8 +212,8 @@ IOReturn NativeAdrenoUserClient::query(NativeAdrenoAbiParams *params)
     if(!open_)return kIOReturnNotReady;
     params->abi_version=NativeAdrenoAbiVersion;
     params->input_bits=input_bits_;params->output_bits=output_bits_;
-    params->flags=NativeAdrenoParamsHostImport|(ownedCoherent()?NativeAdrenoParamsOwnedCoherent:0u)|
-        (NativeAdrenoMemory::memoryPressure()?NativeAdrenoParamsMemoryPressure:0u);params->max_bo_bytes=maxBoBytes();
+    params->flags=NativeAdrenoParamsHostImport|(ownedCoherent()?uint32_t(NativeAdrenoParamsOwnedCoherent):0u)|
+        (NativeAdrenoMemory::memoryPressure()?uint32_t(NativeAdrenoParamsMemoryPressure):0u);params->max_bo_bytes=maxBoBytes();
     return kIOReturnSuccess;
 }
 /* Per client slot (4, the kernel's own client last): [0] live objects now, [1] their peak, [2] refused BoAllocs, [3] last refusal status,
@@ -384,8 +393,12 @@ extern "C" uint64_t native_adreno_now_us(void) __attribute__((weak));
 int32_t NativeAdrenoUserClient::submitPriority() const
 {
     if(priority_foreground_<0 && priority_background_<0)return -1;
-    const int32_t role=task_get_gpu_role(current_task());
+#if defined(PRIO_DARWIN_GPU_BACKGROUND) && defined(PRIO_DARWIN_GPU_UTILITY)
+    const int32_t role=currentGpuRole();
     const bool background=role==PRIO_DARWIN_GPU_BACKGROUND || role==PRIO_DARWIN_GPU_UTILITY;
+#else
+    const bool background=false;
+#endif
     return background?(priority_background_>=0?priority_background_:priority_foreground_)
                      :(priority_foreground_>=0?priority_foreground_:priority_background_);
 }
@@ -398,7 +411,7 @@ IOReturn NativeAdrenoUserClient::setPriority(uint32_t foreground,uint32_t backgr
     {
         const uint32_t n=native_adreno_prio_count;
         volatile uint32_t *row=native_adreno_prio_log[n&31];
-        row[0]=uint32_t(proc_selfpid());row[1]=foreground;row[2]=background;row[3]=uint32_t(task_get_gpu_role(current_task()));
+        row[0]=uint32_t(proc_selfpid());row[1]=foreground;row[2]=background;row[3]=uint32_t(currentGpuRole());
         row[4]=&native_adreno_now_us?uint32_t(native_adreno_now_us()/1000):0;row[5]=priority_told_;
         native_adreno_prio_count=n+1;
         if(priority_told_<0xffffffffu)++priority_told_;
@@ -435,7 +448,7 @@ IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
     ring_->useContext(context_);
     submit_->nextOwner(proc_selfpid());
     submit_->nextPriority(submitPriority());
-    submit_->nextRole(task_get_gpu_role(current_task()));
+    submit_->nextRole(currentGpuRole());
     const IOReturn status=submit_->submit(vm_,buffers,request->buffer_count,
         queue_base_+request->queue,&fence,clock);
     if(status)return status;

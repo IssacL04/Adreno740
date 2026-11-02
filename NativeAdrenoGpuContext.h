@@ -11,11 +11,12 @@
  *   memptrs  msm_rbmemptrs layout: +0 rptr, +4 fence, +8 bv_rptr, +12 bv_fence, R+W
  *   pwrup    the a7xx power-up register list (cpu_gpu_lock header + pairs), R+W
  *   scratch  one page the first submissions may write, R+W
+ *   aqe      A830 only, additional command processor microcode, R+X
  * All mappings are Normal non-cacheable (Linux maps kernel BOs write-combined) and outer shareable; the CPU must use
  * a matching non-cacheable view. Bank, ASID, SMR slots and stream IDs are caller inputs. Nothing is torn down. */
 enum : uint64_t {
     GpuSqeIova=0x100000, GpuRingIova=0x200000, GpuMemptrsIova=0x300000, GpuPwrupIova=0x301000,
-    GpuScratchIova=0x302000,
+    GpuScratchIova=0x302000, GpuAqeIova=0x180000,
     /* The two rings' CP preemption state (NativeAdrenoPreempt): a record per ring of PREEMPT_RECORD_SIZE (4192 KiB, what the CP
      * writes its save area into; msm's PREEMPT_RECORD_SIZE) and the a7xx_cp_smmu_info page its switch reads, then the second
      * ring and its memptrs. */
@@ -31,7 +32,8 @@ enum : size_t {
     /* PREEMPT_RECORD_SIZE(adreno_gpu) = info->preempt_record_size, 4192 KiB where the catalog has none (a6xx_gpu.h); the CP stores
      * its save area in it, so the size is the firmware's, not ours. */
     GpuPreemptRecordBytes=4192*1024,
-    GpuBufferCount=11
+    GpuBufferCount=11, GpuMaxBufferCount=GpuBufferCount, GpuA830BufferCount=6,
+    GpuA830SqeBytes=0x1c000, GpuAqeBytes=0x7000
 };
 struct NativeAdrenoGpuBuffer {uint64_t physical,bytes,iova;};
 /* One GPU process's own address space: a table of the kernel table's shape (the same 0..2^ias aperture and attributes) under its
@@ -45,7 +47,7 @@ class NativeAdrenoProcessVm final {
     ArmSmmu4KLiveVisibility visibility_{};
     ArmSmmu4KContextConfig config_{};
     NativeAdrenoVm vm_;
-    uint64_t handles_[GpuBufferCount]{};
+    uint64_t handles_[GpuMaxBufferCount]{};
     unsigned asid_=0;
     bool attached_=false;
 public:
@@ -56,12 +58,13 @@ public:
 };
 class NativeAdrenoGpuContext final {
     NativeAdrenoTablePages tables_;
-    NativeAdrenoMemory buffers_[GpuBufferCount];
-    uint64_t handles_[GpuBufferCount]{};
+    NativeAdrenoMemory buffers_[GpuMaxBufferCount];
+    uint64_t handles_[GpuMaxBufferCount]{};
     NativeAdrenoSmmuContext smmu_;
     NativeAdrenoVm vm_;
     unsigned input_bits_=0;
-    bool ready_=false,used_=false;
+    bool ready_=false,used_=false,a830_=false;
+    unsigned buffer_count_=GpuBufferCount;
 public:
     enum Step : uint32_t {Allocate=1,Prepare,Program,Attach,VmAttach,Map,Ready};
     NativeAdrenoGpuContext()=default;
@@ -69,10 +72,12 @@ public:
     NativeAdrenoGpuContext &operator=(const NativeAdrenoGpuContext &)=delete;
     /* The report is the GMU context's: route counts cover both streams. */
     IOReturn bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
-        const uint16_t sids[2],void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report);
+        const uint16_t sids[2],void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report,
+        uint32_t chip_id=0x43050a01);
     bool ready() const {return ready_;}
     /* The GPU address size of every table of this bank (ias). */
     unsigned inputBits() const {return input_bits_;}
+    unsigned bufferCount() const {return buffer_count_;}
     const NativeAdrenoMemory &buffer(unsigned index) const {return buffers_[index];}
     NativeAdrenoVm *vm() {return ready_?&vm_:nullptr;}
     /* From now on the bank's TTBR0 may hold a process table: the kernel table's updates stop comparing the bank's TTBR0 with it. */

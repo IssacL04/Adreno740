@@ -15,18 +15,24 @@ enum : uint32_t {
     TimerGmuHigh = 0x14224,
     TimerCpLow = 0x0980,
     TimerCpHigh = 0x0981,
+    TimerA830GmuLow = (0x1f840u<<2)-0x37000u,
+    TimerA830CpLow = 0x08e7,
     TimerRetries = 8
 };
 uint32_t NativeAdrenoTimer::gmuLowOffset(){return TimerGmuLow;}
 uint32_t NativeAdrenoTimer::gmuHighOffset(){return TimerGmuHigh;}
 uint32_t NativeAdrenoTimer::cpLowRegister(){return TimerCpLow;}
 uint32_t NativeAdrenoTimer::cpHighRegister(){return TimerCpHigh;}
-IOReturn NativeAdrenoTimer::attach(const NativeAdrenoTimeIo *io,uint32_t source)
+IOReturn NativeAdrenoTimer::attach(const NativeAdrenoTimeIo *io,uint32_t source,uint32_t chip_id)
 {
     if(attached_)return kIOReturnBusy;
     if(!io || !io->read32)return kIOReturnBadArgument;
     if(source!=NativeAdrenoTimeGmu && source!=NativeAdrenoTimeCp)return kIOReturnBadArgument;
-    io_=*io;source_=source;attached_=true;
+    if(chip_id!=NativeAdrenoChipA740 && chip_id!=NativeAdrenoChipA830)return kIOReturnUnsupported;
+    const bool a830=chip_id==NativeAdrenoChipA830;
+    low_=source==NativeAdrenoTimeGmu?(a830?TimerA830GmuLow:TimerGmuLow):(a830?TimerA830CpLow:TimerCpLow);
+    high_=low_+(source==NativeAdrenoTimeGmu?4:1);
+    io_=*io;attached_=true;
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoTimer::detach()
@@ -39,13 +45,11 @@ IOReturn NativeAdrenoTimer::read(uint64_t *ticks) const
 {
     if(!ticks)return kIOReturnBadArgument;*ticks=0;
     if(!attached_)return kIOReturnNotReady;
-    const uint32_t low=source_==NativeAdrenoTimeGmu?TimerGmuLow:TimerCpLow;
-    const uint32_t high=source_==NativeAdrenoTimeGmu?TimerGmuHigh:TimerCpHigh;
     for(unsigned attempt=0;attempt<TimerRetries;++attempt) {
         uint32_t first=0,low_word=0,second=0;
-        if(io_.read32(io_.cookie,high,&first) ||
-            io_.read32(io_.cookie,low,&low_word) ||
-            io_.read32(io_.cookie,high,&second))return kIOReturnIOError;
+        if(io_.read32(io_.cookie,high_,&first) ||
+            io_.read32(io_.cookie,low_,&low_word) ||
+            io_.read32(io_.cookie,high_,&second))return kIOReturnIOError;
         if(first==second) {
             *ticks=(uint64_t(first)<<32)|low_word;
             return kIOReturnSuccess;

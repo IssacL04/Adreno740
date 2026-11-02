@@ -47,7 +47,8 @@ enum NativeAdrenoRingFence {
     NativeAdrenoRingFencePoisoned,
     NativeAdrenoRingFenceArgument
 };
-enum : uint32_t {NativeAdrenoRingStallWords = 22};   /* NativeAdrenoRing::stallState */
+enum : uint32_t {NativeAdrenoRingStallWords = 22,
+    NativeAdrenoChipA740 = 0x43050a01, NativeAdrenoChipA830 = 0x44050001};
 class NativeAdrenoRing final {
     NativeAdrenoRingIo io_{};
     NativeAdrenoRingCache cache_{};
@@ -75,6 +76,10 @@ class NativeAdrenoRing final {
     bool current_=true;
     uint64_t record_iova_=0,smmu_iova_=0,bv_rptr_iova_=0;
     uint32_t control_=0;
+    uint32_t chip_id_=NativeAdrenoChipA740;
+    uint32_t scratchRegister() const {return chip_id_==NativeAdrenoChipA830?0x082c:0x0885;}
+    uint32_t resetWords() const {return chip_id_==NativeAdrenoChipA830?28:26;}
+    uint32_t tableWords() const {return chip_id_==NativeAdrenoChipA830?6:7;}
     IOReturn poison();
     IOReturn writeWptr(uint32_t value);
     IOReturn readRptr(uint32_t *);
@@ -96,7 +101,8 @@ public:
      * All outputs are prevalidated before any register write. */
     IOReturn attach(const NativeAdrenoRingIo *,const NativeAdrenoRingCache *,
         void *ring,size_t ring_bytes,uint64_t ring_iova,
-        void *fence,size_t fence_bytes,uint64_t fence_iova);
+        void *fence,size_t fence_bytes,uint64_t fence_iova,uint32_t chip_id=NativeAdrenoChipA740);
+    uint32_t chipId() const {return chip_id_;}
     /* Programs nothing. Refuses while submissions are unobserved or poisoned,
      * because only the caller can establish real GPU quiescence and unmap. */
     IOReturn detach();
@@ -195,7 +201,8 @@ public:
     /* Reads the CP's state for a fence that stopped advancing into out[NativeAdrenoRingStallWords]: RBBM_STATUS..STATUS3,
      * RBBM_INT_0_STATUS, CP_HW_FAULT, CP_STATUS_1, CP_PROTECT_STATUS, CP_RB_RPTR, CP_RB_WPTR, CP_IB1_BASE (lo, hi),
      * CP_IB1_REM_SIZE, CP_IB2_BASE (lo, hi), CP_IB2_REM_SIZE, CP_BV_RB_RPTR, CP_BV_IB1_BASE lo, CP_BV_IB1_REM_SIZE,
-     * CP_BV_IB2_REM_SIZE. Never writes a register; a failed read is poison. */
+     * CP_BV_IB2_REM_SIZE. A830 temporarily selects BR/BV apertures and restores the original;
+     * A740 only reads registers. A failed read or aperture restore is poison. */
     IOReturn stallState(uint32_t *out);
     /* Writes CP_RB_WPTR again with the value already published: for a CP that went idle with work in the ring (a lost write pointer
      * notification); harmless when the CP already saw it. */

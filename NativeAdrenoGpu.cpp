@@ -20,6 +20,11 @@ IOReturn NativeAdrenoGpu::start(const NativeAdrenoGpuBoard *board,
         !config->fence || !config->sqe_iova || !config->pwrup_reglist_iova ||
         !config->clock.now_us || !config->start_timeout_us)
         return kIOReturnBadArgument;
+    if(config->chip_id!=NativeAdrenoChipA740 && config->chip_id!=NativeAdrenoChipA830)
+        return kIOReturnUnsupported;
+    if(config->chip_id==NativeAdrenoChipA830?(!config->aqe_iova ||
+        (config->aqe_iova&4095) || config->aqe_iova>=UINT64_C(1)<<48):config->aqe_iova!=0)
+        return kIOReturnBadArgument;
     started_=true;board_=*board;
     IOReturn status=board_.reserve(board_.cookie);
     if(status) {failed_=true;return status;}
@@ -29,9 +34,9 @@ IOReturn NativeAdrenoGpu::start(const NativeAdrenoGpuBoard *board,
     if((status=board_.programSmmu(board_.cookie)))return fail(status);
     steps_=3;
     if((status=ring_.attach(&config->mmio,&config->cache,config->ring,config->ring_bytes,
-        config->ring_iova,config->fence,config->fence_bytes,config->fence_iova)))return fail(status);
+        config->ring_iova,config->fence,config->fence_bytes,config->fence_iova,config->chip_id)))return fail(status);
     steps_=4;
-    NativeAdrenoCpInitConfig cp{config->sqe_iova,config->pwrup_reglist_iova,0};
+    NativeAdrenoCpInitConfig cp{config->sqe_iova,config->pwrup_reglist_iova,0,config->aqe_iova};
     if((status=cp_.run(&config->mmio,&ring_,&cp,&fence_)))return fail(status);
     /* A started CP is not ready until its init fence is actually observed. */
     const NativeAdrenoRingFence started=ring_.wait(fence_,&config->clock,
@@ -39,11 +44,11 @@ IOReturn NativeAdrenoGpu::start(const NativeAdrenoGpuBoard *board,
     if(started!=NativeAdrenoRingFenceComplete)
         return fail(started==NativeAdrenoRingFenceTimeout?kIOReturnTimeout:kIOReturnIOError);
     steps_=5;
-    if((status=irq_.attach(&config->mmio)))return fail(status);
+    if((status=irq_.attach(&config->mmio,config->chip_id)))return fail(status);
     if((status=irq_.programMask(nullptr)))return fail(status);
     steps_=6;
     if(config->time.read32) {
-        if((status=timer_.attach(&config->time,NativeAdrenoTimeGmu)))return fail(status);
+        if((status=timer_.attach(&config->time,NativeAdrenoTimeGmu,config->chip_id)))return fail(status);
         timerTimeOk_=true;
     }
     ready_=true;

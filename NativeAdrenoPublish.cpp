@@ -22,11 +22,13 @@
 #include <kern/thread.h>
 #include "NativeAdrenoUserClient.h"
 #include "NativeAdrenoGpuContext.h"
+#include "NativeAdrenoDiagnostics.h"
 
 extern "C" void proc_selfname(char *, int);
 extern "C" volatile uint32_t native_adreno_table_switches[8];
 /* The plugin's telemetry table (rows of text the Metal bridge keeps), sent as markers: 0xC000|row starts a row, 0x8000|(a<<7)|b appends two characters. */
 extern "C" {char native_adreno_metal_rows[48][96];volatile uint32_t native_adreno_metal_rows_seq;}
+static uint64_t native_adreno_last_call,native_adreno_last_error;
 
 extern "C" {
 /* What the processes that reached this driver did, for the boot diagnostic page. Plain counters and short strings. */
@@ -52,7 +54,7 @@ enum : UInt32 {NativeAdrenoPluginOpenType=0x4147,NativeAdrenoTunnelMagic=0x4e544
  * original sandbox profiles admit this class but not the presenter's own service. Methods 0x7000 + the presenter's NGP_METHOD numbers (mode,
  * wait for a frame, complete it) are forwarded unchanged, without the GPU lock (a wait sleeps); memory type NativeAdrenoScanoutType is the
  * writable scanout. Nothing here touches the GPU. */
-enum : UInt32 {NativeAdrenoHandoffBase=0x7000,NativeAdrenoHandoffLast=0x7003,NativeAdrenoScanoutType=0x5343,
+enum : UInt32 {NativeAdrenoHandoffBase=0x7000,NativeAdrenoHandoffLast=0x7004,NativeAdrenoScanoutType=0x5343,
                NativeAdrenoHandoffOpenType=0x4148};
 /* Open type 0x4148 is a connection that serves only the hand-off: it does not mount a GPU core, so it does not need (or take) a
  * GPU connection slot (the Vulkan driver holds one for as long as the Metal device lives). Same class, so the same sandbox admission. */
@@ -64,6 +66,7 @@ enum : UInt32 {NativeAdrenoExportMethod=0x7100,NativeAdrenoExportMaxPiece=3968};
 extern "C" int boot_log_export_put(uint32_t generation,uint32_t total,uint32_t offset,const void *data,uint32_t size) __attribute__((weak_import));
 extern "C" {volatile uint32_t native_adreno_export_stats[4];}   /* [0] pieces taken, [1] refused, [2] last generation, [3] its total bytes */
 extern "C" IOMemoryDescriptor *native_gop_handoff_memory(void);
+extern "C" void native_gop_handoff_close(task_t) __attribute__((weak_import));
 
 /* Mailbox: a last-resort command channel for a sandbox that admits no external-method selector at all. It is one shared page (memory
  * type NativeAdrenoMailboxType through IOConnectMapMemory64, which the selector filter does not cover) and a kernel poller that runs
@@ -248,6 +251,7 @@ class AGXDeviceUserClient : public IOUserClient {
     OSDeclareDefaultStructors(AGXDeviceUserClient)
     bool live_=false;
     bool handoffOnly_=false;
+    task_t handoffTask_=TASK_NULL;
     bool kernel_=false;
     NativeAdrenoUserClient *core_=nullptr;   /* own core; deleted in free(), so a call that raced the close sees live_ false, never freed memory */
     NativeAdrenoProcessVm *space_=nullptr;   /* a user connection's own address space */
@@ -271,7 +275,7 @@ class AGXDeviceUserClient : public IOUserClient {
     IOReturn run(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size);
     IOReturn runTimed(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size,uint64_t *lockWait);
 public:
-    void setHandoffOnly() {handoffOnly_=true;}
+    void setHandoffOnly(task_t task) {handoffOnly_=true;handoffTask_=task;task_reference(task);}
     bool mount(bool kernel);
     friend IOReturn runCore(AGXDeviceUserClient *,uint32_t,const void *,size_t,void *,size_t,uint64_t *);
     friend void nativeAdrenoMailboxPoller(void *,wait_result_t);
@@ -422,6 +426,7 @@ bool AGXDeviceUserClient::growViews(uint32_t token)
 }
 IOReturn AGXDeviceUserClient::clientClose()
 {
+    if(handoffOnly_ && native_gop_handoff_close)native_gop_handoff_close(handoffTask_);
     dropViews(0);
     IOLockLock(g.lock);
     IOReturn status=kIOReturnSuccess;
@@ -453,10 +458,12 @@ IOReturn AGXDeviceUserClient::clientClose()
 }
 void AGXDeviceUserClient::free()
 {
+    if(handoffOnly_ && native_gop_handoff_close)native_gop_handoff_close(handoffTask_);
     dropViews(0);
     if(views_) {IODelete(views_,View,view_capacity_);views_=nullptr;view_capacity_=0;}
     /* Still live only when a teardown failed: its objects stay referenced by the VM and the ring, so the core is kept, not freed. */
     if(core_ && !live_) {delete core_;core_=nullptr;}
+    if(handoffTask_) {task_deallocate(handoffTask_);handoffTask_=TASK_NULL;}
     IOUserClient::free();
 }
 IOReturn AGXDeviceUserClient::clientMemoryForType(UInt32 type,IOOptionBits *options,IOMemoryDescriptor **memory)
@@ -694,6 +701,8 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
     native_adreno_metal_diag.calls=native_adreno_metal_diag.calls+1;
     native_adreno_metal_diag.last_selector=method;
     native_adreno_metal_diag.last_status=uint32_t(status);
+    __atomic_store_n(&native_adreno_last_call,(uint64_t(method)<<32)|uint32_t(status),__ATOMIC_RELAXED);
+    if(status)__atomic_store_n(&native_adreno_last_error,(uint64_t(method)<<32)|uint32_t(status),__ATOMIC_RELAXED);
     return status;
 }
 IOReturn AGXDeviceUserClient::run(uint32_t method,const void *input,size_t input_size,void *output,size_t output_size)
@@ -810,6 +819,8 @@ IOReturn AGXDeviceUserClient::runTimed(uint32_t method,const void *input,size_t 
         native_adreno_metal_diag.calls=native_adreno_metal_diag.calls+1;
         native_adreno_metal_diag.last_selector=method;
         native_adreno_metal_diag.last_status=uint32_t(status);
+        __atomic_store_n(&native_adreno_last_call,(uint64_t(method)<<32)|uint32_t(status),__ATOMIC_RELAXED);
+    if(status)__atomic_store_n(&native_adreno_last_error,(uint64_t(method)<<32)|uint32_t(status),__ATOMIC_RELAXED);
         if(!status)memcpy(output,&reply,sizeof(reply));
         return status;
     }
@@ -971,7 +982,7 @@ extern "C" IOReturn native_adreno_new_user_client(IOService *provider,task_t own
         native_adreno_open_log_count=native_adreno_open_log_count+1;
     }
     if(type==NativeAdrenoHandoffOpenType) {
-        connection->setHandoffOnly();
+        connection->setHandoffOnly(owningTask);
         *handler=connection;
         return kIOReturnSuccess;
     }
@@ -1143,6 +1154,9 @@ extern "C" bool native_adreno_fences(uint32_t *submitted,uint32_t *retired)
     *submitted=g.ring->lastSubmitted();*retired=value;
     return true;
 }
+/* Boards with their own context instance supply it before publication. */
+extern "C" void native_adreno_set_gpu_context(NativeAdrenoGpuContext *context)
+{if(!g.published)g.context=context;}
 /* Publishes the service once. Everything passed in must outlive the system (the board probe keeps them in statics) and
  * the VM, submit object and ring must already be attached to the live GPU context. The core must not be open. */
 extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit *submit,NativeAdrenoRing *ring,
@@ -1158,7 +1172,7 @@ extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *vm,NativeAdrenoSubmit 
     }
     g.vm=vm;g.submit=submit;g.ring=ring;g.clock=*clock;g.timer=timer;g.info=info;g.input_bits=input_bits;g.output_bits=output_bits;
     /* Per-process address spaces: without table switching every user connection would be refused (createVm needs it). */
-    g.context=NativeAdrenoGpuContextObject();
+    if(!g.context)g.context=NativeAdrenoGpuContextObject();
     IOReturn switching=g.context?g.context->enableSwitching():kIOReturnNotReady;
     if(!switching)switching=submit->setTableSwitching(tableMode(),
         [](void *cookie,uint64_t ttbr0)->IOReturn {return static_cast<NativeAdrenoGpuContext *>(cookie)->writeTtbr0(ttbr0);},g.context);
@@ -1186,6 +1200,28 @@ extern "C" uint32_t native_adreno_publish_stats(uint32_t *closed)
 {
     if(closed)*closed=g.closed;
     return g.opened;
+}
+extern "C" bool native_adreno_diagnostics(NativeAdrenoDiagnostics *out)
+{
+    static NativeAdrenoDiagnostics last{};
+    static bool valid;
+    static unsigned guard;
+    if(!out || !g.published || __atomic_exchange_n(&guard,1,__ATOMIC_ACQUIRE))return false;
+    const bool fresh=IOLockTryLock(g.lock);
+    if(fresh) {
+        const auto stats=g.submit->stats();
+        const uint64_t call=__atomic_load_n(&native_adreno_last_call,__ATOMIC_RELAXED);
+        const uint64_t error=__atomic_load_n(&native_adreno_last_error,__ATOMIC_RELAXED);
+        last={native_adreno_metal_diag.opens,native_adreno_metal_diag.closes,
+            native_adreno_metal_diag.busy,native_adreno_metal_diag.calls,uint32_t(call>>32),uint32_t(call),uint32_t(error>>32),uint32_t(error),
+            stats.submissions,stats.completed,stats.timeouts,stats.poisoned_jobs,0,{}};
+        memcpy(last.opener,native_adreno_metal_diag.opener[0],sizeof(last.opener)-1);
+        valid=true;IOLockUnlock(g.lock);
+    }
+    if(valid) {*out=last;out->cached=!fresh;}
+    const bool available=valid;
+    __atomic_store_n(&guard,0,__ATOMIC_RELEASE);
+    return available;
 }
 extern "C" IOService *native_adreno_published_service()
 {

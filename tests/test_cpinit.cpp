@@ -36,6 +36,45 @@ static void reset(void)
 }
 int main()
 {
+    for(unsigned preprogrammed=0;preprogrammed<2;++preprogrammed) {
+        reset();NativeAdrenoRing ring;
+        CHECK(ring.attach(&io,&cache,ringmem,sizeof(ringmem),0x100000,fencemem,sizeof(fencemem),
+            0x108000,NativeAdrenoChipA830)==kIOReturnSuccess);
+        NativeAdrenoCpInit init;uint32_t fence=0;
+        NativeAdrenoCpInitConfig config{0x123400000,0x300000,preprogrammed,0x123500000};
+        if(preprogrammed) {
+            peer.regs[0x816]=0x23400000;peer.regs[0x817]=1;
+            peer.regs[0x818]=0x23500000;peer.regs[0x819]=1;
+        }
+        CHECK(init.run(&io,&ring,&config,&fence)==kIOReturnSuccess && fence==1);
+        CHECK(peer.regs[0x816]==0x23400000 && peer.regs[0x817]==1);
+        CHECK(peer.regs[0x818]==0x23500000 && peer.regs[0x819]==1);
+        CHECK(peer.regs[0x830]==0 && peer.regs[0x831]==0);
+        CHECK((ringmem[10]>>8&0x3ffffu)==0x82c && ringmem[3]==0x14b);
+    }
+    for(unsigned fail=0;fail<6;++fail) {
+        reset();NativeAdrenoRing ring;
+        CHECK(ring.attach(&io,&cache,ringmem,sizeof(ringmem),0x100000,fencemem,sizeof(fencemem),
+            0x108000,NativeAdrenoChipA830)==kIOReturnSuccess);
+        NativeAdrenoCpInit init;uint32_t fence=99;
+        NativeAdrenoCpInitConfig config{0x200000,0x300000,0,0x400000};
+        const size_t before=peer.writes.size();
+        if(fail<4)peer.fail_write=before+fail+1;
+        else config.aqe_iova=fail==4?0:0x400001;
+        CHECK(init.run(&io,&ring,&config,&fence)==(fail<4?kIOReturnIOError:kIOReturnBadArgument));
+        CHECK(!fence && !init.completed() && peer.regs[0x807]==0);
+        if(fail>=4)CHECK(peer.writes.size()==before);
+    }
+    /* A stale AQE base cannot pass the already-programmed contract. */
+    {
+        reset();NativeAdrenoRing ring;
+        CHECK(ring.attach(&io,&cache,ringmem,sizeof(ringmem),0x100000,fencemem,sizeof(fencemem),
+            0x108000,NativeAdrenoChipA830)==kIOReturnSuccess);
+        peer.regs[0x816]=0x200000;
+        NativeAdrenoCpInit init;uint32_t fence=99;
+        NativeAdrenoCpInitConfig config{0x200000,0x300000,1,0x400000};
+        CHECK(init.run(&io,&ring,&config,&fence)==kIOReturnIOError && !fence && init.poisoned());
+    }
     /* Exact SQE base and CP_ME_INIT sequence through the ring. */
     {
         reset();NativeAdrenoRing ring;CHECK(ring.attach(&io,&cache,ringmem,sizeof(ringmem),0x100000,fencemem,sizeof(fencemem),0x108000)==kIOReturnSuccess);
@@ -90,5 +129,5 @@ int main()
         CHECK(init.run(&io,&ring,&config,&fence)==kIOReturnIOError && init.poisoned());
         CHECK(ring.poisoned() && ring.detach()==kIOReturnBusy);
     }
-    std::printf("PASS: 1 exact CP_ME_INIT sequence with SQE base, 8 pre-MMIO refusals, 1 SQE write failure and 1 ring commit failure over a software CP register peer\n");
+    std::printf("PASS: A740/A830 CP_ME_INIT, A830 SQE/AQE address pairs and readback, validation and write failures over a software CP peer\n");
 }

@@ -33,6 +33,24 @@ static void reset(void)
 }
 int main()
 {
+    {
+        reset();NativeAdrenoIrq irq;
+        CHECK(irq.attach(&io,0x12345678)==kIOReturnUnsupported);
+        CHECK(irq.attach(&io,NativeAdrenoChipA830)==kIOReturnSuccess);
+        uint32_t mask=0;CHECK(irq.programMask(&mask)==kIOReturnSuccess);
+        CHECK(peer.regs[0x62]==mask && !peer.regs[0x38]);
+        peer.regs[0x6a]=1u<<20;
+        NativeAdrenoIrqResult result{};
+        CHECK(irq.handle(&result)==kIOReturnSuccess && result.flags==NativeAdrenoIrqFence);
+        CHECK(peer.last_write_reg==0x61);
+        peer.regs[0x6a]=1u<<9;peer.regs[0x8b5]=1u<<17;
+        CHECK(irq.handle(&result)==kIOReturnSuccess);
+        CHECK(result.cp_status==(1u<<17) && result.flags==(NativeAdrenoIrqCpError|NativeAdrenoIrqFatal));
+        peer.regs[0x8b5]=0;
+        CHECK(irq.handle(&result)==kIOReturnSuccess && (result.flags&NativeAdrenoIrqFatal));
+        peer.fail_write=peer.writes+1;
+        CHECK(irq.handle(&result)==kIOReturnIOError && irq.poisoned());
+    }
     /* Mask programming matches the pinned A7XX enable set exactly. */
     {
         reset();NativeAdrenoIrq irq;CHECK(irq.attach(&io)==kIOReturnSuccess);
@@ -105,5 +123,5 @@ int main()
         CHECK(fifth.detach()==kIOReturnNotReady);
         CHECK(irq.detach()==kIOReturnNotReady && second.detach()==kIOReturnNotReady);
     }
-    std::printf("PASS: 1 exact A7XX mask programming, 10 decoded interrupt/status cases, 5 poison-on-unacknowledged cases over a software register peer\n");
+    std::printf("PASS: A740/A830 IRQ register selection, fence/fault decoding and acknowledgement failures over software peers\n");
 }

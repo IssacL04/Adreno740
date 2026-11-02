@@ -106,7 +106,7 @@ IOReturn NativeAdrenoVm::attach(const ArmSmmu4KIo *io,ArmSmmu4KContextConfig *co
     order_=IONewData(uint32_t,64);
     capacity_=first;mapping_capacity_=64;
     if(!changes_ || !alias_scratch_ || !mappings_ || !order_ || !index_.allocate()) {freeTables();return kIOReturnNoMemory;}
-    memset(mappings_,0,sizeof(Mapping)*64);
+    for(size_t i=0;i<64;++i)mappings_[i]=Mapping{};
     free_hint_=0;high_=0;memset(class_spans_,0,sizeof(class_spans_));order_count_[0]=order_count_[1]=0;
     io_=*io;context_=context;streams_=streams;budget_=budget;
     if(lower)regions_[0]=*lower;if(upper)regions_[1]=*upper;
@@ -160,7 +160,7 @@ bool NativeAdrenoVm::growMappings()
     if(!made)return false;
     uint32_t *order=IONewData(uint32_t,size);
     if(!order) {IODeleteData(made,Mapping,size);return false;}
-    memset(made,0,sizeof(Mapping)*size);
+    for(size_t i=0;i<size;++i)made[i]=Mapping{};
     memcpy(made,mappings_,sizeof(Mapping)*mapping_capacity_);
     memcpy(order,order_,sizeof(uint32_t)*(order_count_[0]+order_count_[1]));
     IODeleteData(mappings_,Mapping,mapping_capacity_);IODeleteData(order_,uint32_t,mapping_capacity_);

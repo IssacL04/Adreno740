@@ -14,10 +14,12 @@ static int read32(void *cookie,uint32_t address,uint32_t *value)
 {
     CHECK(cookie==&peer && value);++peer.reads;
     if(peer.reads==peer.fail_read)return 1;
-    if(address==NativeAdrenoTimer::gmuLowOffset() || address==NativeAdrenoTimer::cpLowRegister()) {
+    if(address==NativeAdrenoTimer::gmuLowOffset() || address==NativeAdrenoTimer::cpLowRegister() ||
+        address==0x47100 || address==0x8e7) {
         peer.last_low_address=address;*value=peer.low;return 0;
     }
-    if(address==NativeAdrenoTimer::gmuHighOffset() || address==NativeAdrenoTimer::cpHighRegister()) {
+    if(address==NativeAdrenoTimer::gmuHighOffset() || address==NativeAdrenoTimer::cpHighRegister() ||
+        address==0x47104 || address==0x8e8) {
         peer.last_high_address=address;
         /* Emulate a high-word change between the bracketing reads. */
         *value=peer.high;
@@ -32,6 +34,16 @@ static int unsettled(void *cookie,uint32_t address,uint32_t *value)
 {(void)cookie;(void)address;*value=++unsettled_reads;return 0;}
 int main()
 {
+    for(unsigned source=0;source<2;++source) {
+        peer=Peer{};peer.low=0xfffffff0;peer.high=7;peer.unstable=1;
+        NativeAdrenoTimer timer;uint64_t ticks=0;
+        CHECK(timer.attach(&io,source,0)==kIOReturnUnsupported);
+        CHECK(timer.attach(&io,source,NativeAdrenoChipA830)==kIOReturnSuccess);
+        CHECK(timer.read(&ticks)==kIOReturnSuccess && ticks==UINT64_C(0x8fffffff0));
+        CHECK(peer.last_low_address==(source?0x8e7:0x47100));
+        CHECK(peer.last_high_address==(source?0x8e8:0x47104));
+        CHECK(peer.reads==6);
+    }
     /* The derived A740 GMU offsets are the pinned values. */
     {
         CHECK(NativeAdrenoTimer::gmuLowOffset()==0x14220);
@@ -94,5 +106,5 @@ int main()
         CHECK(timer.read(&ticks)==kIOReturnTimeout && !ticks);
         CHECK(unsettled_reads==3*8);
     }
-    std::printf("PASS: 1 derived-offset check, 2 stable reads, 1 rollover retry, 1 I/O failure and 1 bounded torn-loop timeout over a software counter peer\n");
+    std::printf("PASS: A740/A830 GMU/CP counters, rollover, I/O failure and bounded torn-read timeout over a software peer\n");
 }

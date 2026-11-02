@@ -12,6 +12,7 @@
  * power-up register list address and BIT(31) to read it. */
 enum : uint32_t {
     CpSqeInstrBase = 0x0830,
+    CpA830SqeInstrBase = 0x0816,
     CpThreadControlOpcode = 0x17,
     CpMeInitOpcode = 0x48,
     CpConcurrentBinDisable = 1u << 27,
@@ -36,12 +37,20 @@ IOReturn NativeAdrenoCpInit::run(const NativeAdrenoRingIo *io,NativeAdrenoRing *
         config->sqe_iova>=UINT64_C(1)<<48 || !config->pwrup_reglist_iova ||
         (config->pwrup_reglist_iova&3) || config->pwrup_reglist_iova>=UINT64_C(1)<<48)
         return kIOReturnBadArgument;
+    const bool a830=ring->chipId()==NativeAdrenoChipA830;
+    if(a830?(!config->aqe_iova || (config->aqe_iova&4095) ||
+        config->aqe_iova>=UINT64_C(1)<<48):config->aqe_iova!=0)return kIOReturnBadArgument;
+    const uint32_t sqe_base=a830?CpA830SqeInstrBase:CpSqeInstrBase;
     if(config->sqe_base_programmed) {
         uint32_t lo=0,hi=0;
-        if(!io->read32 || io->read32(io->cookie,CpSqeInstrBase,&lo) || io->read32(io->cookie,CpSqeInstrBase+1,&hi) ||
+        if(!io->read32 || io->read32(io->cookie,sqe_base,&lo) || io->read32(io->cookie,sqe_base+1,&hi) ||
             (((uint64_t)hi<<32)|lo)!=config->sqe_iova)return poison();
-    } else if(io->write32(io->cookie,CpSqeInstrBase,(uint32_t)config->sqe_iova) ||
-        io->write32(io->cookie,CpSqeInstrBase+1,(uint32_t)(config->sqe_iova>>32)))
+        if(a830 && (io->read32(io->cookie,0x0818,&lo) || io->read32(io->cookie,0x0819,&hi) ||
+            (((uint64_t)hi<<32)|lo)!=config->aqe_iova))return poison();
+    } else if(io->write32(io->cookie,sqe_base,(uint32_t)config->sqe_iova) ||
+        io->write32(io->cookie,sqe_base+1,(uint32_t)(config->sqe_iova>>32)) ||
+        (a830 && (io->write32(io->cookie,0x0818,(uint32_t)config->aqe_iova) ||
+                  io->write32(io->cookie,0x0819,(uint32_t)(config->aqe_iova>>32)))))
         return poison();
     uint32_t words[CpInitWords]={0};
     if(AdrenoPM4Type7(CpThreadControlOpcode,1,&words[0])!=AdrenoPM4Success ||

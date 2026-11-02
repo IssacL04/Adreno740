@@ -72,7 +72,11 @@ extern "C" {volatile uint64_t (*native_adreno_tl)[8]=nullptr;volatile uint32_t n
  * 4 snapshot, 0 the stall ended) | timed-out waits << 8, [3] time the fence had been pending (us), [4] read and write pointer before | after << 32 for
  * events 1 and 3, [5] client queue, [6] the job's first buffer handle | its buffer count << 48, [7] the sequence number. */
 extern "C" {volatile uint64_t native_adreno_stall_log[32][8];volatile uint32_t native_adreno_stall_log_count;}
+#if defined(NATIVE_ADRENO_HOST_TEST) && !defined(__APPLE__)
+extern "C" volatile uint32_t native_gpu_dcvs[15] __attribute__((weak));
+#else
 extern "C" volatile uint32_t native_gpu_dcvs[15] __attribute__((weak_import));
+#endif
 IOReturn NativeAdrenoSubmit::poison()
 {
     poisoned_=true;return kIOReturnIOError;
@@ -404,7 +408,11 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
      * caches over every mapped BO are cleaned and invalidated. The board shows the last submission's record on a stall. */
     uint32_t cached=~0u,before=~0u,ignored=0,after=~0u;
     /* Write-combined stores this CPU made before the call (the client's command words) complete before anything below. */
+#ifdef NATIVE_ADRENO_HOST_TEST
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#else
     __asm__ volatile("dsb sy":::"memory");
+#endif
     /* int-098/099: with write-combined user BOs and no maintenance the CP stopped at the end of the first IB, as in int-065..069 when an
      * IB sat in a CPU cache. While write-combined BOs are trusted, every line of this submission's IBs is compared as a CPU cache and
      * DRAM hold it (bounded). A dirty line means a client view still caches its BOs: maintain every BO from now on, this submission

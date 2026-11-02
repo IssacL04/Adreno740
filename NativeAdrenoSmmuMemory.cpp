@@ -102,7 +102,11 @@ IOReturn NativeAdrenoTablePages::release()
 static int publishTable(void *cookie,volatile uint64_t *page,size_t bytes)
 {
     if(native_adreno_walk_coherent[0]) {
+#ifdef NATIVE_ADRENO_HOST_TEST
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#else
         __asm__ volatile("dsb st":::"memory");
+#endif
         native_adreno_walk_coherent[1]=native_adreno_walk_coherent[1]+1;
         return 0;
     }

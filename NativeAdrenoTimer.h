@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef NATIVE_ADRENO_TIMER_H
 #define NATIVE_ADRENO_TIMER_H
-#include <IOKit/IOTypes.h>
+#include "NativeAdrenoRing.h"
 #include <stdint.h>
 
 /* GPU always-on counter reader for the user-visible timestamp. Two sources are
@@ -23,7 +23,7 @@ struct NativeAdrenoTimeIo {
 };
 class NativeAdrenoTimer final {
     NativeAdrenoTimeIo io_{};
-    uint32_t source_=NativeAdrenoTimeGmu;
+    uint32_t low_=0,high_=0;
     bool attached_=false;
 public:
     NativeAdrenoTimer()=default;
@@ -31,7 +31,7 @@ public:
     NativeAdrenoTimer(const NativeAdrenoTimer &)=delete;
     NativeAdrenoTimer &operator=(const NativeAdrenoTimer &)=delete;
     /* Source is a numeric ABI boundary value and is range-checked. */
-    IOReturn attach(const NativeAdrenoTimeIo *,uint32_t source);
+    IOReturn attach(const NativeAdrenoTimeIo *,uint32_t source,uint32_t chip_id=NativeAdrenoChipA740);
     IOReturn detach();
     IOReturn read(uint64_t *ticks) const;
     static uint32_t gmuLowOffset();

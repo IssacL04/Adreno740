@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+extern "C" int proc_selfpid() {return 42;}
 extern "C" volatile uint32_t native_adreno_io_coherent;
 extern "C" volatile uint32_t native_adreno_coherent_skips[4];
 #define CHECK(x) do {if(!(x)){std::fprintf(stderr,"line %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
@@ -44,6 +45,7 @@ struct CpPeer {
 };
 static CpPeer cp;
 static uint64_t clock_us=0;
+extern "C" uint64_t native_adreno_now_us(void) {return clock_us;}
 static int cwrite(void *c,uint32_t reg,uint32_t v)
 {CHECK(c==&cp && reg<cp.regs.size());cp.regs[reg]=v;cp.writes.push_back(reg);return 0;}
 static int cread(void *c,uint32_t reg,uint32_t *v)
@@ -539,20 +541,28 @@ int main()
         CHECK(p.client.waitFence(&future,&ringclock)==kIOReturnBadArgument);
         CHECK(p.client.close()==kIOReturnSuccess);
     }
-    /* Large objects try one contiguous run first and fall back to scattered pages when that fails (and a refused retry). */
+    /* Fragmentation must not trigger contiguous search for ordinary BOs; explicit requests retain the requirement. */
     {
         Path p;CHECK(exposed(p)==kIOReturnSuccess);
-        NativeAdrenoAbiBoAlloc big{1u<<20,12,0};
-        NativeAdrenoAbiBoAllocReply allocated{};
+        fixture.mode=ScatterUnlessContiguous;fixture.contiguous_limit=4096;
+        const unsigned contiguous=fixture.contiguous_requests,pageable=fixture.pageable;
+        NativeAdrenoAbiBoAlloc big{65536,12,0};NativeAdrenoAbiBoAllocReply allocated{};
+        CHECK(p.client.allocBo(&big,&allocated)==kIOReturnSuccess && allocated.handle);
+        CHECK(fixture.contiguous_requests==contiguous && fixture.pageable==pageable+1);
+        NativeAdrenoAbiBoMap map{allocated.handle,0x800000,3,0,2,0};NativeAdrenoAbiBoMapReply mapped{};
+        CHECK(p.client.mapBo(&map,&mapped)==kIOReturnSuccess && p.vm.spanCount()>=16);
+        NativeAdrenoAbiSubmit submit{};submit.buffer_count=1;submit.buffers[0]={allocated.handle,0x800000,1024};
+        NativeAdrenoAbiSubmitReply reply{};CHECK(p.client.submit(&submit,&reply,&ringclock)==kIOReturnSuccess);
+        fencemem[1]=reply.fence;
+        const unsigned contiguous_after_map=fixture.contiguous_requests;
+        NativeAdrenoAbiBoAlloc required{65536,12,1};NativeAdrenoAbiBoAllocReply refused{};
+        CHECK(p.client.allocBo(&required,&refused)==kIOReturnNoMemory && !refused.handle);
+        CHECK(fixture.contiguous_requests==contiguous_after_map+1 && fixture.pageable==pageable+1);
         fixture.allocation_fail_count=1;
-        CHECK(p.client.allocBo(&big,&allocated)==kIOReturnSuccess && allocated.handle && fixture.allocation_fail_count==0);
-        NativeAdrenoAbiBoAllocReply second{};
-        fixture.allocation_fail_count=2; /* contiguous and scattered both fail */
-        CHECK(p.client.allocBo(&big,&second)==kIOReturnNoMemory && !second.handle && fixture.allocation_fail_count==0);
-        NativeAdrenoAbiBoAlloc demanded{1u<<20,12,1};
-        fixture.allocation_fail_count=1; /* a demanded contiguous run is not retried scattered */
-        CHECK(p.client.allocBo(&demanded,&second)==kIOReturnNoMemory);
+        CHECK(p.client.allocBo(&big,&refused)==kIOReturnNoMemory && !refused.handle && !fixture.allocation_fail_count);
         CHECK(p.client.releaseAll(&ringclock,1000)==kIOReturnSuccess);
+        fixture.mode=Contiguous;fixture.contiguous_limit=0;
+        std::puts("PASS: ordinary BO skips contiguous search; scattered pages map, submit, retire and release; explicit contiguity preserved");
     }
     /* Version and mount refusals, then a commit that poisons everything. */
     {
@@ -664,3 +674,9 @@ IOReturn NativeAdrenoMaintainPhysicalPages(uint64_t physical,size_t bytes,Native
     if(!physical || !bytes || ((physical|bytes)&4095) || op>NativeAdrenoInvalidate)std::abort();
     ++fixture.physical_calls;fixture.physical_bytes+=bytes;return kIOReturnSuccess;
 }
+
+void NativeAdrenoNotePhase(unsigned,size_t) {}
+bool NativeAdrenoPagesUncached(const NativeAdrenoPhysicalSpan *,size_t) {return false;}
+extern "C" int PE_parse_boot_argn(const char *,void *,int) {return 0;}
+extern "C" unsigned int native_pmap_user_mappings(ppnum_t,void **,uint64_t *,char *) {return 0;}
+extern "C" {volatile uint32_t native_gpu_dcvs[15];}

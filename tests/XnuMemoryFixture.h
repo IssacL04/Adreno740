@@ -22,6 +22,7 @@ constexpr unsigned kIODirectionOut=2,kIODirectionInOut=3,kIOMemoryMapperNone=0x8
 /* The kernel's physical range (phystokv's), wide enough for every fixture address. */
 extern "C" {inline uint64_t gPhysBase=0,gPhysSize=UINT64_C(1)<<36;}
 inline void *IOMallocZero(size_t bytes) {return std::calloc(1,bytes);}
+inline void IOFree(void *p,size_t) {std::free(p);}
 inline void *kernel_task=reinterpret_cast<void *>(1);
 using task_t=void *;
 /* ScatterUnlessContiguous: what the tablet does, one physical page per span unless the caller asked for contiguous memory. */
@@ -29,8 +30,8 @@ enum SegmentMode {Contiguous,Scattered,ZeroPhysical,UnalignedPhysical,ShortSegme
 class IOBufferMemoryDescriptor;
 struct MemoryFixture {
     unsigned created=0,prepared=0,completed=0,released=0,cache_calls=0,segment_calls=0;
-    unsigned pageable=0,write_combined_entries=0;   /* inTaskWithOptions: pageable buffers with no task, those with a write-combined entry */
-    unsigned allocation_fail_count=0;
+    unsigned pageable=0,write_combined_entries=0;
+    unsigned allocation_fail_count=0,contiguous_requests=0,scattered_requests=0;
     bool allocation_fail=false,prepare_fail=false,complete_fail=false,metadata_fail=false;
     bool write_protected_imports=false;   /* user ranges that can only be pinned for reading: prepare() of a writable one reports KERN_PROTECTION_FAILURE */
     bool null_mapping=false,unaligned_mapping=false,wrong_length=false;
@@ -80,6 +81,7 @@ public:
     void retain() {++retains;}
     static IOBufferMemoryDescriptor *inTaskWithPhysicalMask(void *task,unsigned options,size_t bytes,uint64_t mask) {
         if(task!=kernel_task || !(options&kIOMemoryMapperNone))std::abort();
+        if(options&kIOMemoryPhysicallyContiguous)++fixture.contiguous_requests;else ++fixture.scattered_requests;
         if(fixture.allocation_fail)return nullptr;
         if(fixture.allocation_fail_count) {--fixture.allocation_fail_count;return nullptr;}
         if(fixture.contiguous_limit && (options&kIOMemoryPhysicallyContiguous) && bytes>fixture.contiguous_limit)return nullptr;
@@ -122,6 +124,7 @@ public:
     uint64_t address=0,bytes=0,physical_base=0;unsigned options=0;
     static IOMemoryDescriptor *withAddressRange(uint64_t address,uint64_t bytes,unsigned options,task_t task) {
         if(!task || task==kernel_task || !(options&kIOMemoryMapperNone))std::abort();
+        if(options&kIOMemoryPhysicallyContiguous)++fixture.contiguous_requests;else ++fixture.scattered_requests;
         if(fixture.allocation_fail)return nullptr;
         auto *d=new IOMemoryDescriptor;d->options=options;d->address=address;d->bytes=bytes;d->physical_base=fixture.next_physical;
         fixture.next_physical+=2*bytes+0x10000;++fixture.imported;++fixture.imports_live;return d;

@@ -14,7 +14,7 @@ IOReturn NativeAdrenoSmmuContext::prepare(NativeAdrenoTablePages *tables,unsigne
     /* The adreno SMMU node is dma-coherent at the pinned tree, so table walks are inner write-back. */
     config_=(ArmSmmu4KContextConfig){.lower=upper?nullptr:&arena_.config,.upper=upper?&arena_.config:nullptr,
         .lower_tables=upper?nullptr:&state_.tables,.upper_tables=upper?&state_.tables:nullptr,.id0=0,.id2=0,
-        .asid=asid,.coherent_walk=1,.stall_on_fault=0,.continue_after_fault=1};
+        .asid=asid,.coherent_walk=1,.stall_on_fault=0,.continue_after_fault=1,.ttbr0_switched=0};
     tables_=tables;bank_=bank;poll_budget_=poll_budget;prepared_=true;
     return kIOReturnSuccess;
 }

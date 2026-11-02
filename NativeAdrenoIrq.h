@@ -19,7 +19,7 @@ enum NativeAdrenoIrqFlag {
 struct NativeAdrenoIrqResult {
     uint32_t flags, status, unknown, cp_status, protect_status;
 };
-/* A7XX RBBM/CP interrupt decode and acknowledgement, not an XNU interrupt
+/* A740/A830 RBBM/CP interrupt decode and acknowledgement, not an XNU interrupt
  * source. IO read/write take dword register indices. The hardware interrupt
  * must already be masked at the controller by the caller, and the caller must
  * serialize handle() against every other MMIO user. Mask programming happens
@@ -29,6 +29,7 @@ struct NativeAdrenoIrqResult {
 class NativeAdrenoIrq final {
     NativeAdrenoRingIo io_{};
     uint32_t enabled_=0;
+    uint32_t chip_id_=NativeAdrenoChipA740;
     bool attached_=false,poisoned_=false;
     IOReturn poison();
 public:
@@ -36,7 +37,7 @@ public:
     ~NativeAdrenoIrq()=default;
     NativeAdrenoIrq(const NativeAdrenoIrq &)=delete;
     NativeAdrenoIrq &operator=(const NativeAdrenoIrq &)=delete;
-    IOReturn attach(const NativeAdrenoRingIo *);
+    IOReturn attach(const NativeAdrenoRingIo *,uint32_t chip_id=NativeAdrenoChipA740);
     IOReturn detach();
     /* The exact A7XX enable set: AHB, ATB async, GPC, CP_SW, CP_HW, PM4,
      * RB_DONE_TS, CACHE_FLUSH_TS, ATB bus, hang, UCHE OOB/trap, TSB, fuse. */

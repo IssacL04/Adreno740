@@ -54,6 +54,8 @@ enum : uint32_t {
     RingCacheInvalidate = 0x31,
     RingPerfctrSramInit = 0x050e,
     RingPerfctrSramInitStatus = 0x050f,
+    RingA830PerfctrSramInit = 0x0449,
+    RingA830PerfctrSramStatus = 0x019f,
     RingWaitRegMem = 0x3c,
     RingWaitWriteEq = 3,
     RingResetWords = 26,
@@ -154,6 +156,24 @@ IOReturn NativeAdrenoRing::stallState(uint32_t *out)
         0x0210,0x0211,0x0212,0x0213,0x0201,0x0821,0x0825,0x0824,RingRptr,RingWptr,
         0x0928,0x0929,0x092a,0x092b,0x092c,0x092d,0x0a66,0x0a6d,0x0a70,0x0a74,0x0a71,0x0a72};
     if(!out)return kIOReturnBadArgument;
+    if(!attached_ || poisoned_)return kIOReturnNotReady;
+    if(chip_id_==NativeAdrenoChipA830) {
+        // A830 banks the CP status by pipe; preserve the caller's aperture even on a failed read.
+        const uint32_t global[]={0x12,0x13,0x15,0x16,0x6a};
+        for(unsigned i=0;i<5;++i)
+            if(io_.read32(io_.cookie,global[i],out+i))return poison();
+        uint32_t saved=0;
+        if(io_.read32(io_.cookie,0x081c,&saved))return poison();
+        bool failed=io_.write32(io_.cookie,0x081c,1u<<12) || io_.barrier(io_.cookie);
+        const uint32_t br[]={0x8b3,0x8b9,0x84f,RingRptr,RingWptr,0x900,0x901,0x902,0x904,0x905,0x906};
+        for(unsigned i=0;!failed && i<11;++i)failed=io_.read32(io_.cookie,br[i],out+5+i);
+        if(!failed)failed=io_.write32(io_.cookie,0x081c,2u<<12) || io_.barrier(io_.cookie);
+        const uint32_t bv[]={0x80a,0x900,0x902,0x906,0x904,0x905};
+        // The existing diagnostic ABI keeps only the low word of BV IB1.
+        for(unsigned i=0;!failed && i<6;++i)failed=io_.read32(io_.cookie,bv[i],out+16+i);
+        const bool restore_failed=io_.write32(io_.cookie,0x081c,saved) || io_.barrier(io_.cookie);
+        return failed || restore_failed?poison():kIOReturnSuccess;
+    }
     for(uint32_t i=0;i<NativeAdrenoRingStallWords;++i)
         if(io_.read32(io_.cookie,regs[i],&out[i]))return poison();
     return kIOReturnSuccess;
@@ -186,10 +206,10 @@ static size_t packet(uint32_t *words,size_t at,uint32_t opcode,const uint32_t *p
     return at+1+count;
 }
 /* CP_REG_TO_MEM of the always-on counter into the timeline slot of this fence (second: the end half). */
-static size_t stamp(uint32_t *words,size_t at,uint64_t fence_iova,uint32_t seqno,bool end)
+static size_t stamp(uint32_t *words,size_t at,uint64_t fence_iova,uint32_t seqno,bool end,uint32_t counter)
 {
     const uint64_t to=fence_iova+RingStampOffset+(uint64_t)(seqno&63)*16+(end?8:0);
-    const uint32_t payload[3]={RingAlwaysOnCounter|(2u<<18)|(1u<<30),(uint32_t)to,(uint32_t)(to>>32)};
+    const uint32_t payload[3]={counter|(2u<<18)|(1u<<30),(uint32_t)to,(uint32_t)(to>>32)};
     return packet(words,at,RingRegToMem,payload,3);
 }
 /* Thread selection and IFPC disable before the user buffers, as a7xx_submit() does; the first submission after
@@ -199,10 +219,11 @@ static size_t stamp(uint32_t *words,size_t at,uint64_t fence_iova,uint32_t seqno
 IOReturn NativeAdrenoRing::emitPrologue(uint32_t at,bool reset,bool table,uint32_t *end,uint32_t number)
 {
     const uint32_t mask=(uint32_t)(ring_bytes_/4-1);
-    uint32_t words[RingPrologueWords+RingResetWords+RingTableWords+RingStampWords+RingPseudoWords]={0};
+    uint32_t words[RingPrologueWords+RingResetWords+2+RingTableWords+RingStampWords+RingPseudoWords]={0};
     const uint32_t br=RingSyncThreads|RingThreadBr,syncBoth=RingSyncThreads|RingThreadBoth,both=RingThreadBoth,marker=0x101;
+    const bool a830=chip_id_==NativeAdrenoChipA830;
     if(table && !reset)return poison();
-    const uint32_t count=RingPrologueWords+(reset?RingResetWords:0)+(table?RingTableWords:0)+(stamps_?RingStampWords:0)+(preempt_?RingPseudoWords:0);
+    const uint32_t count=RingPrologueWords+(reset?resetWords():0)+(table?tableWords():0)+(stamps_?uint32_t(RingStampWords):0)+(preempt_?uint32_t(RingPseudoWords):0);
     size_t n=packet(words,0,RingThreadControl,&br,1);
     if(reset) {
         const uint64_t at4=fence_iova_+4;
@@ -214,21 +235,24 @@ IOReturn NativeAdrenoRing::emitPrologue(uint32_t at,bool reset,bool table,uint32
         if(n)n=packet(words,n,RingThreadControl,&syncBoth,1);
         if(n)n=packet(words,n,RingFenceOpcode,&lrz,1);
         if(n)n=packet(words,n,RingThreadControl,&br,1);
-        if(n && AdrenoPM4Type4(RingPerfctrSramInit,1,&words[n])==AdrenoPM4Success) {words[n+1]=1;n+=2;} else n=0;
+        if(n && AdrenoPM4Type4(a830?RingA830PerfctrSramInit:RingPerfctrSramInit,1,&words[n])==AdrenoPM4Success) {words[n+1]=1;n+=2;} else n=0;
+        if(a830) {
+            if(n && AdrenoPM4Type4(0x05e8,1,&words[n])==AdrenoPM4Success) {words[n+1]=1;n+=2;} else n=0;
+        }
         if(table) {
             const uint32_t update[4]={(uint32_t)table_,(uint32_t)(table_>>32),0,0};
-            if(n)n=packet(words,n,RingSmmuTableUpdate,update,4);
+            if(n)n=packet(words,n,RingSmmuTableUpdate,update,a830?3:4);
             if(n)n=packet(words,n,RingThreadControl,&br,1);
         }
         if(n)n=packet(words,n,RingFenceOpcode,&invalidate,1);
-        const uint32_t sram[6]={RingWaitWriteEq,RingPerfctrSramInitStatus,0,1,1,0};
+        const uint32_t sram[6]={RingWaitWriteEq,a830?RingA830PerfctrSramStatus:RingPerfctrSramInitStatus,0,1,1,0};
         if(n)n=packet(words,n,RingWaitRegMem,sram,6);
     }
     const uint32_t flush=RingCacheFlush7,invalidate7=RingCacheInvalidate7;
     if(n)n=packet(words,n,RingFenceOpcode,&flush,1);
     if(n)n=packet(words,n,RingFenceOpcode,&invalidate7,1);
     if(n)n=packet(words,n,RingWaitForIdle,nullptr,0);
-    if(n && stamps_)n=stamp(words,n,fence_iova_,number,false);
+    if(n && stamps_)n=stamp(words,n,fence_iova_,number,false,chip_id_==NativeAdrenoChipA830?0x08e7u:uint32_t(RingAlwaysOnCounter));
     if(n && preempt_) {
         const uint32_t pseudo[12]={RingPseudoSmmuInfo,0,0,RingPseudoNonSecureSave,(uint32_t)record_iova_,(uint32_t)(record_iova_>>32),
             RingPseudoNonPrivSave,0,0,RingPseudoCounter,0,0};
@@ -245,7 +269,7 @@ IOReturn NativeAdrenoRing::emitFence(uint32_t at,uint32_t seqno,uint32_t *end)
 {
     const uint32_t mask=(uint32_t)(ring_bytes_/4-1);
     uint32_t words[RingFenceWords]={0};
-    if(AdrenoPM4Type4(RingScratch,1,&words[0])!=AdrenoPM4Success ||
+    if(AdrenoPM4Type4(scratchRegister(),1,&words[0])!=AdrenoPM4Success ||
         AdrenoPM4Type7(RingFenceOpcode,4,&words[2])!=AdrenoPM4Success)return poison();
     words[1]=seqno;
     words[3]=RingFenceEvent|RingFenceEnable|RingFenceIrq;
@@ -265,8 +289,8 @@ IOReturn NativeAdrenoRing::emitFramedFence(uint32_t at,uint32_t seqno,uint32_t *
 {
     const uint32_t mask=(uint32_t)(ring_bytes_/4-1);
     uint32_t words[RingFramedFenceWords+RingStampWords+RingYieldWords]={0};
-    const uint32_t total=RingFramedFenceWords+(stamps_?RingStampWords:0)+(yield?RingYieldWords:0);
-    if(AdrenoPM4Type4(RingScratch,1,&words[0])!=AdrenoPM4Success)return poison();
+    const uint32_t total=RingFramedFenceWords+(stamps_?uint32_t(RingStampWords):0)+(yield?uint32_t(RingYieldWords):0);
+    if(AdrenoPM4Type4(scratchRegister(),1,&words[0])!=AdrenoPM4Success)return poison();
     words[1]=seqno;
     /* The timestamp goes to +4 (msm_rbmemptrs.fence), where wait() reads it; +0 is the CP's RPTR shadow. */
     const uint64_t at4=fence_iova_+4,bv=fence_iova_+RingBvFenceOffset;
@@ -276,7 +300,7 @@ IOReturn NativeAdrenoRing::emitFramedFence(uint32_t at,uint32_t seqno,uint32_t *
     const uint32_t bvWait[4]={0,(uint32_t)bv,(uint32_t)(bv>>32),seqno};
     const uint32_t fence[4]={RingFenceEvent|RingFenceEnable|RingFenceIrq,(uint32_t)at4,(uint32_t)(at4>>32),seqno};
     size_t n=packet(words,2,RingThreadControl,&br,1);
-    if(n && stamps_)n=stamp(words,n,fence_iova_,seqno,true);
+    if(n && stamps_)n=stamp(words,n,fence_iova_,seqno,true,chip_id_==NativeAdrenoChipA830?0x08e7u:uint32_t(RingAlwaysOnCounter));
     if(n)n=packet(words,n,RingFenceOpcode,&depth,1);
     if(n)n=packet(words,n,RingFenceOpcode,&color,1);
     if(n)n=packet(words,n,RingThreadControl,&bvThread,1);
@@ -295,16 +319,17 @@ IOReturn NativeAdrenoRing::emitFramedFence(uint32_t at,uint32_t seqno,uint32_t *
     *end=(at+total)&mask;return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoRing::attach(const NativeAdrenoRingIo *io,const NativeAdrenoRingCache *cache,
-    void *ring,size_t ring_bytes,uint64_t ring_iova,void *fence,size_t fence_bytes,uint64_t fence_iova)
+    void *ring,size_t ring_bytes,uint64_t ring_iova,void *fence,size_t fence_bytes,uint64_t fence_iova,uint32_t chip_id)
 {
     if(attached_ || poisoned_ || ring_ || fence_)return kIOReturnBusy;
+    if(chip_id!=NativeAdrenoChipA740 && chip_id!=NativeAdrenoChipA830)return kIOReturnUnsupported;
     if(!io || !io->write32 || !io->read32 || !io->barrier || !cache ||
         !cache->publish || !cache->acquire || !ring || !fence ||
         ring_bytes<8192 || ring_bytes>(1u<<20) || (ring_bytes&(ring_bytes-1)) ||
         ((ring_iova|ring_bytes)&(ring_bytes-1)) || (ring_iova&4095) ||
         fence_bytes<64 || (fence_iova&7) || fence_bytes>=(1u<<24))return kIOReturnBadArgument;
     /* No register may be touched before every argument is acceptable. */
-    io_=*io;cache_=*cache;ring_=static_cast<volatile uint32_t *>(ring);
+    chip_id_=chip_id;io_=*io;cache_=*cache;ring_=static_cast<volatile uint32_t *>(ring);
     ring_bytes_=ring_bytes;ring_iova_=ring_iova;
     fence_=static_cast<volatile uint32_t *>(fence);fence_bytes_=fence_bytes;fence_iova_=fence_iova;
     for(size_t i=0;i<fence_bytes_/4;++i)fence_[i]=0;
@@ -337,6 +362,7 @@ IOReturn NativeAdrenoRing::attachSecondary(const NativeAdrenoRingIo *io,const Na
 IOReturn NativeAdrenoRing::setPreempt(uint64_t record,uint64_t smmu_info,uint64_t bv_rptr_addr)
 {
     if(!attached_ || poisoned_)return kIOReturnNotReady;
+    if(chip_id_!=NativeAdrenoChipA740)return kIOReturnUnsupported;
     if(!record || !smmu_info)return kIOReturnBadArgument;
     record_iova_=record;smmu_iova_=smmu_info;bv_rptr_iova_=bv_rptr_addr;
     preempt_=true;
@@ -368,9 +394,14 @@ IOReturn NativeAdrenoRing::program()
     const uint32_t base_lo=(uint32_t)ring_iova_,base_hi=(uint32_t)(ring_iova_>>32);
     const uint32_t rptr_lo=(uint32_t)fence_iova_,rptr_hi=(uint32_t)(fence_iova_>>32);
     const uint32_t writes[]={RingBase,base_lo,RingBase+1,base_hi,RingControl,control,
-        RingRptrAddress,rptr_lo,RingRptrAddress+1,rptr_hi,RingWptr,0,RingScratch,0};
+        RingRptrAddress,rptr_lo,RingRptrAddress+1,rptr_hi,RingWptr,0,scratchRegister(),0};
     for(size_t i=0;i<sizeof(writes)/sizeof(writes[0]);i+=2)
         if(io_.write32(io_.cookie,writes[i],writes[i+1]))return poison();
+    if(chip_id_==NativeAdrenoChipA830) {
+        const uint64_t bv=fence_iova_+8;
+        if(io_.write32(io_.cookie,0x0808,(uint32_t)bv) ||
+            io_.write32(io_.cookie,0x0809,(uint32_t)(bv>>32)))return poison();
+    }
     uint32_t rptr=0;IOReturn status=readRptr(&rptr);
     if(status)return status;
     next_=rptr;return kIOReturnSuccess;
@@ -523,7 +554,7 @@ IOReturn NativeAdrenoRing::submitWords(const uint32_t *words,size_t word_count,u
     const uint32_t size_words=(uint32_t)(ring_bytes_/4),mask=size_words-1;
     const bool reset=framed && reset_pending_,table=reset && table_pending_;
     /* A plain (kernel) submission cannot carry the switch: a pending table waits for the next framed one. */
-    const uint32_t extra=framed?RingPrologueWords+(reset?RingResetWords:0)+(table?RingTableWords:0)+RingFramedFenceWords+
+    const uint32_t extra=framed?RingPrologueWords+(reset?resetWords():0)+(table?tableWords():0)+RingFramedFenceWords+
         (stamps_?2*RingStampWords:0)+(preempt_?RingPseudoWords+RingYieldWords:0):RingFenceWords;
     if(word_count>size_words-extra-8)return kIOReturnNoResources;
     uint32_t rptr=0;IOReturn status=readRptr(&rptr);

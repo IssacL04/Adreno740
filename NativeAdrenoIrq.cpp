@@ -13,6 +13,10 @@ enum : uint32_t {
     IrqRbbmMask = 0x0038,
     IrqCpStatus = 0x0823,
     IrqCpProtect = 0x0824,
+    IrqA830RbbmStatus = 0x006a,
+    IrqA830RbbmClear = 0x0061,
+    IrqA830RbbmMask = 0x0062,
+    IrqA830CpGlobal = 0x08b5,
     IrqBitIdle = 1u << 0,
     IrqBitAhb = 1u << 1,
     IrqBitAtbAsync = 1u << 6,
@@ -64,11 +68,12 @@ uint32_t NativeAdrenoIrq::cpErrorMask()
 {
     return kCpErrors;
 }
-IOReturn NativeAdrenoIrq::attach(const NativeAdrenoRingIo *io)
+IOReturn NativeAdrenoIrq::attach(const NativeAdrenoRingIo *io,uint32_t chip_id)
 {
     if(attached_ || poisoned_)return kIOReturnBusy;
     if(!io || !io->read32 || !io->write32 || !io->barrier)return kIOReturnBadArgument;
-    io_=*io;attached_=true;enabled_=0;
+    if(chip_id!=NativeAdrenoChipA740 && chip_id!=NativeAdrenoChipA830)return kIOReturnUnsupported;
+    io_=*io;chip_id_=chip_id;attached_=true;enabled_=0;
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoIrq::detach()
@@ -81,8 +86,9 @@ IOReturn NativeAdrenoIrq::programMask(uint32_t *programmed)
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     if(programmed)*programmed=0;
     uint32_t readback=0;
-    if(io_.write32(io_.cookie,IrqRbbmMask,kEnable))return poison();
-    if(io_.read32(io_.cookie,IrqRbbmMask,&readback))return poison();
+    const uint32_t mask_register=chip_id_==NativeAdrenoChipA830?IrqA830RbbmMask:IrqRbbmMask;
+    if(io_.write32(io_.cookie,mask_register,kEnable))return poison();
+    if(io_.read32(io_.cookie,mask_register,&readback))return poison();
     if(readback!=kEnable)return poison();
     enabled_=readback;
     if(programmed)*programmed=readback;
@@ -94,9 +100,10 @@ IOReturn NativeAdrenoIrq::handle(NativeAdrenoIrqResult *result)
     *result={};
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     uint32_t status=0;
-    if(io_.read32(io_.cookie,IrqRbbmStatus,&status))return poison();
+    const bool a830=chip_id_==NativeAdrenoChipA830;
+    if(io_.read32(io_.cookie,a830?IrqA830RbbmStatus:IrqRbbmStatus,&status))return poison();
     /* Linux acknowledges the whole read status before decoding it. */
-    if(io_.write32(io_.cookie,IrqRbbmClear,status))return poison();
+    if(io_.write32(io_.cookie,a830?IrqA830RbbmClear:IrqRbbmClear,status))return poison();
     if(io_.barrier(io_.cookie))return poison();
     uint32_t flags=0,cp_status=0,protect=0;
     if(status&IrqBitCpFence)flags|=NativeAdrenoIrqFence;
@@ -107,8 +114,11 @@ IOReturn NativeAdrenoIrq::handle(NativeAdrenoIrqResult *result)
     if(status&(IrqBitAhb|IrqBitGpc|IrqBitAtbAsync|IrqBitAtbBus))flags|=NativeAdrenoIrqBusError;
     if(status&(IrqBitTsbWrite|IrqBitFuse))flags|=NativeAdrenoIrqSecurity;
     if(status&IrqBitCpHw) {
-        if(io_.read32(io_.cookie,IrqCpStatus,&cp_status))return poison();
-        if(cp_status&kCpErrors) {
+        if(io_.read32(io_.cookie,a830?IrqA830CpGlobal:IrqCpStatus,&cp_status))return poison();
+        if(a830) {
+            // Global Gen8 fault is fatal even if its pipe status has already cleared.
+            flags|=NativeAdrenoIrqCpError;
+        } else if(cp_status&kCpErrors) {
             if(io_.read32(io_.cookie,IrqCpProtect,&protect))return poison();
             flags|=NativeAdrenoIrqCpError;
         }

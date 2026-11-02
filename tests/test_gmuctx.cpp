@@ -4,6 +4,7 @@
  * the values read on sheng (int-005); ID2 was not read there, so the peer's value is an assumption. */
 #include "XnuMemoryFixture.h"
 #include "NativeAdrenoGmuContext.h"
+#include "ArmSmmu4KMmio.h"
 #include <cstdio>
 #include <cstring>
 #define CHECK(x) do {if(!(x)){std::fprintf(stderr,"line %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
@@ -36,6 +37,15 @@ static int write64(void *,size_t at,uint64_t v)
 static int barrier(void *){return 0;}
 static unsigned steps[16],step_count;
 static void progress(uint32_t step){CHECK(step_count<16);steps[step_count++]=step;}
+#ifdef NATIVE_ADRENO_HOST_TEST
+/* The board wrapper binds the same software peer; this test performs no host MMIO. */
+extern "C" ArmSmmu4KStatus ArmSmmu4KBindMmio(ArmSmmu4KMmio *window,ArmSmmu4KIo *out)
+{
+    if(!window || !out || window->bytes!=SMMU_BYTES)return ArmSmmu4KUnsupported;
+    *out={nullptr,SMMU_BYTES,read32,read64,write32,write64,barrier};
+    return ArmSmmu4KSuccess;
+}
+#endif
 int main()
 {
     const ArmSmmu4KIo io{&peer,SMMU_BYTES,read32,read64,write32,write64,barrier};
@@ -143,11 +153,12 @@ int main()
         CHECK(context.bringUp(&io,1,1,2,5,nullptr,nullptr)==kIOReturnBadArgument);
         CHECK(report.step==0);
     }
-    /* The board entry over the kit's direct MMIO adapter on a plain array. A plain array has no
-     * write-one-to-clear FSR, so the cleared fault status reads back set: the enable is refused as a
-     * fault and the bank left disabled. Then its single-use guard. */
+    /* A stuck FSR fault bit must refuse the board entry and leave the bank disabled. */
     {
         reset();
+#ifdef NATIVE_ADRENO_HOST_TEST
+        peer.frozen=cb+0x58;mmio[(cb+0x58)/4]=0x2;
+#endif
         NativeAdrenoGmuContextReport report;
         CHECK(NativeAdrenoGmuContextBringup(reinterpret_cast<volatile uint8_t *>(mmio),SMMU_BYTES,1,1,2,5,
             nullptr,&report)!=kIOReturnSuccess);
@@ -171,3 +182,8 @@ IOReturn NativeAdrenoMaintainPhysicalPages(uint64_t physical,size_t bytes,Native
     if(!physical || !bytes || ((physical|bytes)&4095) || op>NativeAdrenoInvalidate)std::abort();
     ++fixture.physical_calls;fixture.physical_bytes+=bytes;return kIOReturnSuccess;
 }
+
+void NativeAdrenoNotePhase(unsigned,size_t) {}
+bool NativeAdrenoPagesUncached(const NativeAdrenoPhysicalSpan *,size_t) {return false;}
+extern "C" int PE_parse_boot_argn(const char *,void *,int) {return 0;}
+extern "C" unsigned int native_pmap_user_mappings(ppnum_t,void **,uint64_t *,char *) {return 0;}

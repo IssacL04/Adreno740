@@ -72,6 +72,46 @@ static int attach(NativeAdrenoRing &r)
 {return r.attach(&io,&cache,ring,sizeof(ring),0x100000,fence,sizeof(fence),0x108000);}
 int main()
 {
+    {
+        reset();NativeAdrenoRing r;
+        CHECK(r.attach(&io,&cache,ring,sizeof(ring),0x100000,fence,sizeof(fence),0x108000,0x123)==kIOReturnUnsupported);
+        CHECK(peer.writes.empty() && fence[0]==0xa5a5a5a5);
+        CHECK(r.attach(&io,&cache,ring,sizeof(ring),0x100000,fence,sizeof(fence),0x108000,NativeAdrenoChipA830)==kIOReturnSuccess);
+        CHECK(peer.regs[0x808]==0x108008 && peer.regs[0x809]==0 && r.chipId()==NativeAdrenoChipA830);
+        const size_t writes=peer.writes.size();
+        CHECK(r.setPreempt(0x10000000,0x20000000,0x108008)==kIOReturnUnsupported);
+        CHECK(!r.preemption() && peer.writes.size()==writes);
+        r.requestContextReset();const uint32_t commands[]={0x70000000};uint32_t end=0;
+        CHECK(r.submitFramed(commands,1,&end)==kIOReturnSuccess && end==1 && peer.regs[0x807]==71);
+        CHECK((ring[17]>>8&0x3ffffu)==0x449 && ring[18]==1);
+        CHECK((ring[19]>>8&0x3ffffu)==0x5e8 && ring[20]==1);
+        CHECK((ring[23]>>16&0x7fu)==0x3c && ring[25]==0x19f);
+        CHECK((ring[40]>>8&0x3ffffu)==0x82c && ring[41]==1);
+        CHECK((ring[57]>>16&0x7fu)==0x14 && ring[59]==0x10800c);
+        CHECK((ring[62]>>16&0x7fu)==0x46 && ring[64]==0x108004);
+        CHECK(r.wait(1,&clock_,1000,nullptr)==NativeAdrenoRingFenceTimeout);
+        fence[1]=1;CHECK(r.wait(1,&clock_,1000,nullptr)==NativeAdrenoRingFenceComplete);
+        CHECK(r.detach()==kIOReturnSuccess);
+    }
+    {
+        reset();NativeAdrenoRing r;
+        CHECK(r.attach(&io,&cache,ring,sizeof(ring),0x100000,fence,sizeof(fence),0x108000,NativeAdrenoChipA830)==kIOReturnSuccess);
+        r.useTable(UINT64_C(0x0010000012345000));
+        const uint32_t words[]={0x70000000};uint32_t end=0;
+        CHECK(r.submitFramed(words,1,&end)==kIOReturnSuccess && peer.regs[0x807]==77);
+        CHECK((ring[21]>>16&0x7fu)==0x53 && (ring[21]&0x3fffu)==3);
+        CHECK(ring[22]==0x12345000 && ring[23]==0x00100000 && ring[24]==0);
+        CHECK((ring[25]>>16&0x7fu)==0x17 && ring[26]==(1u<<31|1));
+    }
+    for(unsigned fail=0;fail<2;++fail) {
+        reset();NativeAdrenoRing r;
+        CHECK(r.attach(&io,&cache,ring,sizeof(ring),0x100000,fence,sizeof(fence),0x108000,NativeAdrenoChipA830)==kIOReturnSuccess);
+        peer.regs[0x81c]=0x123456;peer.regs[0x12]=0x9876;
+        if(fail)peer.fail_read=peer.read_calls+7;
+        uint32_t snapshot[NativeAdrenoRingStallWords]={};
+        CHECK(r.stallState(snapshot)==(fail?kIOReturnIOError:kIOReturnSuccess));
+        CHECK(peer.regs[0x81c]==0x123456 && snapshot[0]==0x9876 && r.poisoned()==bool(fail));
+    }
     /* Exact register programming and one complete submission. */
     {
         reset();NativeAdrenoRing r;
@@ -117,19 +157,20 @@ int main()
         CHECK(r.detach()==kIOReturnSuccess);
     }
     /* Timeline stamps: the CP's always-on counter is read into the fence page before the user words and after them, and read back by fence. */
-    {
+    for(uint32_t chip:{NativeAdrenoChipA740,NativeAdrenoChipA830}) {
         reset();NativeAdrenoRing r;
-        CHECK(attach(r)==kIOReturnSuccess);
+        CHECK(r.attach(&io,&cache,ring,sizeof(ring),0x100000,fence,sizeof(fence),0x108000,chip)==kIOReturnSuccess);
+        const uint32_t counter=chip==NativeAdrenoChipA830?0x8e7:0x980;
         r.setTimeline(true);
         const uint32_t words[4]={0x11111111,0x22222222,0x33333333,0x44444444};
         uint32_t end=0;
         CHECK(r.submitFramed(words,4,&end)==kIOReturnSuccess && end==1);
         CHECK(peer.writes.back().first==0x0807 && peer.writes.back().second==46+8);
         auto op=[](uint32_t header) {return (header>>28)==7u?(header>>16)&0x7fu:0xffu;};
-        CHECK(op(ring[6])==0x26 && op(ring[7])==0x3e && ring[8]==(0x980u|(2u<<18)|(1u<<30)) && ring[9]==0x108000u+512+16 && ring[10]==0);
+        CHECK(op(ring[6])==0x26 && op(ring[7])==0x3e && ring[8]==(counter|(2u<<18)|(1u<<30)) && ring[9]==0x108000u+512+16 && ring[10]==0);
         CHECK(op(ring[11])==0x17 && ring[12]==3 && op(ring[13])==0x65 && ring[14]==0x101);
         for(unsigned i=0;i<4;++i)CHECK(ring[15+i]==words[i]);
-        CHECK(op(ring[21])==0x17 && ring[22]==1 && op(ring[23])==0x3e && ring[24]==(0x980u|(2u<<18)|(1u<<30)) && ring[25]==0x108000u+512+16+8 && ring[26]==0);
+        CHECK(op(ring[21])==0x17 && ring[22]==1 && op(ring[23])==0x3e && ring[24]==(counter|(2u<<18)|(1u<<30)) && ring[25]==0x108000u+512+16+8 && ring[26]==0);
         CHECK(op(ring[27])==0x46 && ring[28]==0x18);
         uint64_t start=0,stop=0;
         fence[132]=1000;fence[133]=0;fence[134]=1700;fence[135]=0;
