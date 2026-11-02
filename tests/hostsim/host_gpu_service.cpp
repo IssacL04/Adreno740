@@ -114,6 +114,7 @@ IOReturn translate(IOReturn status) {return status;}
 extern "C" {
 /* The kernel KPI the user client names an import's task by; the host stand-in is this process. */
 int proc_selfpid(void) {return getpid();}
+void native_gpu_trace_record(uint32_t,uint32_t,const uint64_t *,uint32_t) {}
 /* Return codes are the fixture's IOReturn values; the shim translates them. */
 int host_gpu_open() {
     std::lock_guard<std::recursive_mutex> guard(serviceLock);

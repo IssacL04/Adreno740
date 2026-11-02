@@ -46,6 +46,7 @@ struct CpPeer {
 static CpPeer cp;
 static uint64_t clock_us=0;
 extern "C" uint64_t native_adreno_now_us(void) {return clock_us;}
+extern "C" void native_gpu_trace_record(uint32_t,uint32_t,const uint64_t *,uint32_t) {}
 static int cwrite(void *c,uint32_t reg,uint32_t v)
 {CHECK(c==&cp && reg<cp.regs.size());cp.regs[reg]=v;cp.writes.push_back(reg);return 0;}
 static int cread(void *c,uint32_t reg,uint32_t *v)
