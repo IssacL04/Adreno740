@@ -120,7 +120,7 @@ private:
     enum : uint32_t {PreemptSwitchTimeoutUs=30000,PreemptStrandedUs=2000000,PreemptAgingUs=250000};   /* a switch not done in 30 ms; a ring-1 job unreached for 2 s */
     bool preempt_dead_=false,stranded_=false;
     uint32_t dead_reason_=0,rescues_=0;
-    void markPreemptDead(uint32_t reason) {if(!preempt_dead_) {preempt_dead_=true;dead_reason_=reason;}}
+    void markPreemptDead(uint32_t reason);
     NativeAdrenoRing *ringOfFence(uint32_t fence) const;
     unsigned ringForPriority() const;
     bool ringDisjoint(unsigned ring,const uint64_t *handles,size_t count) const;
@@ -164,6 +164,8 @@ public:
     /* The interrupt's side of a switch: the ring the CP moved to is the one whose write pointer is given again. Returns whether a
      * switch completed. Called from the GPU interrupt (native_adreno_preempt_irq). */
     bool preemptIrq();
+    /* Global completed prefix for scanout: later completions on another ring cannot skip pending work. */
+    bool fenceProgress(uint32_t *submitted,uint32_t *retired,uint32_t *rings=nullptr);
     /* The switch counters, the ring the CP runs, whether a switch is in flight and the control register as the hardware holds it. */
     /* A word of ring `index`'s preemption record as the CPU sees it now (the CP saves the read pointer, info and errno there). */
     uint32_t recordWord(unsigned index,uint32_t byte_offset) const
@@ -197,6 +199,7 @@ public:
     /* Turns on table switching (mode 1 or 2, see table_mode_); write installs a TTBR0 from the CPU (used by mode 1 and to leave a
      * table that is about to be freed). Only with no job outstanding. */
     IOReturn setTableSwitching(unsigned mode,IOReturn (*write)(void *,uint64_t),void *cookie);
+    unsigned preemptionMode() const {return preempt_setup_.mode;}
     unsigned tableMode() const {return table_mode_;}
     /* Before a VM is freed: waits for every job, and when the GPU's table is that VM's, installs the default table from the CPU. */
     IOReturn forgetVm(NativeAdrenoVm *,const NativeAdrenoRingClock *,uint32_t timeout_us);
