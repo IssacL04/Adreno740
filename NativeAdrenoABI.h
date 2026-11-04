@@ -12,6 +12,8 @@
  * rather than ignored. */
 enum {
     NativeAdrenoAbiVersion = 2,
+    NativeAdrenoAbiMaxBoBytesShift = 28, /* 256 MiB per object */
+    NativeAdrenoAbiMaxQueues = 8,
     NativeAdrenoAbiMaxBuffers = 128,   /* a frame's IBs in one submission (Turnip splits a larger one) */
     NativeAdrenoMethodQuery = 1,
     NativeAdrenoMethodBoAlloc = 2,
